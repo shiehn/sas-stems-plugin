@@ -1,9 +1,9 @@
 /**
- * AudioTexturePanel — Real UI for the @signalsandsorcery/audio-texture plugin
+ * StemsPanel — Real UI for the @signalsandsorcery/stems plugin
  *
  * Renders the audio track list with description input, FX controls,
- * and AI generation. Uses ONLY PluginHost methods — no EngineContext,
- * no window.electronAPI.
+ * AI generation, and stem splitting. Uses ONLY PluginHost methods —
+ * no EngineContext, no window.electronAPI.
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
@@ -33,10 +33,10 @@ interface AudioTrackState {
 }
 
 // ============================================================================
-// AudioTexturePanel
+// StemsPanel
 // ============================================================================
 
-export function AudioTexturePanel({
+export function StemsPanel({
   host,
   activeSceneId,
   isAuthenticated,
@@ -123,7 +123,7 @@ export function AudioTexturePanel({
       }
       setTracks(trackStates);
     } catch (error: unknown) {
-      console.error('[AudioTexturePanel] Failed to load tracks:', error);
+      console.error('[StemsPanel] Failed to load tracks:', error);
     } finally {
       setIsLoadingTracks(false);
     }
@@ -615,7 +615,7 @@ function AudioTrackRow({
             value={description}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => onDescriptionChange(handle.id, e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Describe your audio texture..."
+            placeholder="Describe your audio..."
             disabled={isGenerating}
             className="sas-input w-full px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
           />
@@ -770,4 +770,4 @@ function pluginFxToToggleFx(sdkState: PluginTrackFxDetailState): TrackFxDetailSt
   return result;
 }
 
-export default AudioTexturePanel;
+export default StemsPanel;

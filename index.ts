@@ -1,8 +1,10 @@
 /**
- * @signalsandsorcery/audio-texture — Built-in Audio Texture Generator Plugin
+ * @signalsandsorcery/stems — Built-in Stems Plugin
  *
- * Generates AI audio textures from text prompts using the host's
- * audio generation pipeline (Lyria 3). Manages audio tracks within scenes.
+ * Generates AI audio stems from text prompts using the host's audio
+ * generation pipeline (Lyria 3), then optionally splits the result into
+ * vocals/drums/bass/other via the stem splitter. Manages audio tracks
+ * within scenes.
  */
 
 import type { ComponentType } from 'react';
@@ -13,13 +15,13 @@ import type {
   PluginSettingsSchema,
   MusicalContext,
 } from '@signalsandsorcery/plugin-sdk';
-import { AudioTexturePanel } from './AudioTexturePanel';
+import { StemsPanel } from './StemsPanel';
 
-export class AudioTexturePlugin implements GeneratorPlugin {
-  readonly id = '@signalsandsorcery/audio-texture';
-  readonly displayName = 'Audio';
+export class StemsPlugin implements GeneratorPlugin {
+  readonly id = '@signalsandsorcery/stems';
+  readonly displayName = 'Stems';
   readonly version = '1.0.0';
-  readonly description = 'AI-generated audio textures using text prompts';
+  readonly description = 'AI-generated audio stems from text prompts';
   readonly generatorType = 'audio' as const;
   readonly minHostVersion = '1.0.0';
 
@@ -27,16 +29,16 @@ export class AudioTexturePlugin implements GeneratorPlugin {
 
   async activate(host: PluginHost): Promise<void> {
     this.host = host;
-    console.log('[AudioTexturePlugin] Activated');
+    console.log('[StemsPlugin] Activated');
   }
 
   async deactivate(): Promise<void> {
     this.host = null;
-    console.log('[AudioTexturePlugin] Deactivated');
+    console.log('[StemsPlugin] Deactivated');
   }
 
   getUIComponent(): ComponentType<PluginUIProps> {
-    return AudioTexturePanel;
+    return StemsPanel;
   }
 
   getSettingsSchema(): PluginSettingsSchema | null {
@@ -48,8 +50,8 @@ export class AudioTexturePlugin implements GeneratorPlugin {
   }
 
   onContextChanged(_context: MusicalContext): void {
-    // No action needed for audio textures on context change
+    // No action needed on context change
   }
 }
 
-export default AudioTexturePlugin;
+export default StemsPlugin;

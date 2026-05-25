@@ -1,7 +1,7 @@
 {
-  "name": "@signalsandsorcery/audio-texture",
+  "name": "@signalsandsorcery/stems",
   "version": "1.0.0",
-  "description": "AI-generated audio textures using text prompts",
+  "description": "AI-generated audio stems from text prompts, with optional stem splitting",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsup",

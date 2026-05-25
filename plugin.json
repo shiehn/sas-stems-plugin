@@ -1,8 +1,8 @@
 {
-  "id": "@signalsandsorcery/audio-texture",
-  "displayName": "Audio Textures",
+  "id": "@signalsandsorcery/stems",
+  "displayName": "Stems",
   "version": "1.0.0",
-  "description": "AI-generated audio textures using text prompts",
+  "description": "AI-generated audio stems from text prompts, with optional stem splitting",
   "generatorType": "audio",
   "main": "index.js",
   "author": "Signals & Sorcery",
