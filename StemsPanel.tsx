@@ -8,8 +8,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GiSoundWaves } from 'react-icons/gi';
-import type { PluginUIProps, PluginTrackHandle, PluginTrackRuntimeState, PluginTrackFxDetailState, PluginFxCategoryDetailState, FxCategory, TrackFxDetailState } from '@signalsandsorcery/plugin-sdk';
-import { VolumeSlider, PanSlider, FxToggleBar, SorceryProgressBar, EMPTY_FX_DETAIL_STATE } from '@signalsandsorcery/plugin-sdk';
+import type { PluginUIProps, PluginTrackHandle, PluginTrackRuntimeState, PluginTrackFxDetailState, PluginFxCategoryDetailState, FxCategory, TrackFxDetailState, PluginCuePoints, PluginTrimWindow } from '@signalsandsorcery/plugin-sdk';
+import { VolumeSlider, PanSlider, FxToggleBar, SorceryProgressBar, EMPTY_FX_DETAIL_STATE, OffsetScrubber } from '@signalsandsorcery/plugin-sdk';
+import { TrimEditorDrawer } from './TrimEditorDrawer';
 
 // ============================================================================
 // Constants
@@ -30,6 +31,23 @@ interface AudioTrackState {
   fxDrawerOpen: boolean;
   isGenerating: boolean;
   isSplitting: boolean;
+  /**
+   * Cue-points sidecar from the audio tool `trim` command (Migration
+   * 060). Drives the OffsetScrubber's tick marks + snap behavior. Null
+   * for tracks generated before detection landed (older binary, or fresh
+   * track with no audio yet).
+   */
+  cuePoints: PluginCuePoints | null;
+  /** Manual sample offset applied to the clip (signed). 0 = no offset. */
+  offsetSamples: number;
+  /** Path to the raw, un-trimmed Lyria output. Drives the trim editor. */
+  rawFilePath: string | null;
+  /** Beats in raw-file sample coordinates — snap targets in the trim editor. */
+  rawCuePoints: PluginCuePoints | null;
+  /** Current trim window inside the raw file, or null when never set. */
+  trimWindow: PluginTrimWindow | null;
+  /** Whether the trim editor drawer is open for this track. */
+  trimDrawerOpen: boolean;
 }
 
 // ============================================================================
@@ -56,17 +74,43 @@ export function StemsPanel({
   const engineToDbIdRef = useRef<Map<string, string>>(new Map());
 
   // ─── Load tracks when scene changes ──────────────────────────────
+  // Stale-scene guard: `tracks` is keyed implicitly by activeSceneId, but
+  // React keeps the prior scene's tracks until loadTracks finishes its
+  // async fetch (engine adopt + DB query + per-track info — several
+  // hundred ms in practice). During that window the new scene's panel
+  // renders the OLD scene's audio rows. Clear on real scene transitions
+  // so the gap is empty, not stale.
+  const tracksLoadedForSceneRef = useRef<string | null>(null);
   const loadTracks = useCallback(async (): Promise<void> => {
-    if (!activeSceneId) {
+    // Snapshot the scene this load is for. Each subsequent await is a
+    // chance for `activeSceneId` to change or for a newer loadTracks to
+    // take over. When that happens, this load must NOT call setTracks —
+    // otherwise the old scene's results overwrite the new scene's panel.
+    const sceneAtStart = activeSceneId;
+    if (!sceneAtStart) {
       setTracks([]);
+      tracksLoadedForSceneRef.current = null;
       return;
     }
+
+    // Scene changed since the last load → clear immediately so the user
+    // sees the new (empty) state, not the prior scene's tracks. Same-scene
+    // refetches (re-adoption, agent mutation) keep the existing rows up.
+    if (tracksLoadedForSceneRef.current !== sceneAtStart) {
+      setTracks([]);
+    }
+    tracksLoadedForSceneRef.current = sceneAtStart;
+
+    const isStale = (): boolean => tracksLoadedForSceneRef.current !== sceneAtStart;
 
     setIsLoadingTracks(true);
     try {
       await host.adoptSceneTracks();
+      if (isStale()) return;
       const handles = await host.getPluginTracks();
-      const descriptions = await host.getAllSceneData(activeSceneId) as Record<string, unknown>;
+      if (isStale()) return;
+      const descriptions = await host.getAllSceneData(sceneAtStart) as Record<string, unknown>;
+      if (isStale()) return;
 
       // Build engine→dbId lookup for callbacks that receive engine IDs
       const idMap = new Map<string, string>();
@@ -111,6 +155,32 @@ export function StemsPanel({
           ? descriptions[descKey] as string
           : '';
 
+        // Cue points + offset (Migration 060). Both are best-effort —
+        // returning null/0 when not yet stored is the expected default
+        // path for tracks generated before this feature shipped.
+        let cuePoints: PluginCuePoints | null = null;
+        let offsetSamples = 0;
+        let rawFilePath: string | null = null;
+        let rawCuePoints: PluginCuePoints | null = null;
+        let trimWindow: PluginTrimWindow | null = null;
+        try {
+          cuePoints = await host.getCuePoints(handle.id);
+        } catch (err: unknown) {
+          console.warn('[StemsPanel] getCuePoints failed for', handle.id, err);
+        }
+        try {
+          offsetSamples = await host.getAudioOffsetSamples(handle.id);
+        } catch (err: unknown) {
+          console.warn('[StemsPanel] getAudioOffsetSamples failed for', handle.id, err);
+        }
+        try {
+          rawFilePath = await host.getRawAudioFilePath(handle.id);
+          rawCuePoints = await host.getRawCuePoints(handle.id);
+          trimWindow = await host.getTrimWindow(handle.id);
+        } catch (err: unknown) {
+          console.warn('[StemsPanel] raw-trim metadata load failed for', handle.id, err);
+        }
+
         trackStates.push({
           handle,
           description,
@@ -119,13 +189,24 @@ export function StemsPanel({
           fxDrawerOpen: false,
           isGenerating: false,
           isSplitting: false,
+          cuePoints,
+          offsetSamples,
+          rawFilePath,
+          rawCuePoints,
+          trimWindow,
+          trimDrawerOpen: false,
         });
       }
+      if (isStale()) return;
       setTracks(trackStates);
     } catch (error: unknown) {
       console.error('[StemsPanel] Failed to load tracks:', error);
     } finally {
-      setIsLoadingTracks(false);
+      // Only clear the loading indicator if no newer loadTracks has taken
+      // over — otherwise we'd race with the newer load's own loading state.
+      if (tracksLoadedForSceneRef.current === sceneAtStart) {
+        setIsLoadingTracks(false);
+      }
     }
   }, [host, activeSceneId]);
 
@@ -141,6 +222,27 @@ export function StemsPanel({
       loadTracks();
     });
     return unsub;
+  }, [host, loadTracks]);
+
+  // ─── Re-adopt tracks after agent/CLI tool mutations ──────────────
+  // Tools like compose_scene or add_sample_track may produce stems-plugin
+  // tracks via the HTTP API path, which bypasses host methods. Without this
+  // listener the panel doesn't see the new tracks until the user manually
+  // switches scenes. Debounced 500ms so tool bursts coalesce.
+  useEffect(() => {
+    if (typeof host.onAfterAgentMutation !== 'function') return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = host.onAfterAgentMutation(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        loadTracks();
+      }, 500);
+    });
+    return () => {
+      unsub?.();
+      if (timer) clearTimeout(timer);
+    };
   }, [host, loadTracks]);
 
   // Keep engine→dbId ref in sync with current tracks (for newly created tracks
@@ -204,6 +306,12 @@ export function StemsPanel({
         fxDrawerOpen: false,
         isGenerating: false,
         isSplitting: false,
+        cuePoints: null,
+        offsetSamples: 0,
+        rawFilePath: null,
+        rawCuePoints: null,
+        trimWindow: null,
+        trimDrawerOpen: false,
       };
       setTracks(prev => [...prev, newTrack]);
       onExpandSelf?.();
@@ -273,10 +381,76 @@ export function StemsPanel({
       await host.writeAudioClip(trackId, result.filePath);
       // Set default volume to match other track types
       await host.setTrackVolume(trackId, 0.75);
+      // Mute newly generated tracks by default — matches the synth generator
+      // (SynthGeneratorPanel.handleGenerate) so a fresh texture doesn't blast
+      // out while the user is still setting up. The M button un-mutes when the
+      // user is ready to audition. Optimistic local update below mirrors it.
+      await host.setTrackMute(trackId, true).catch(() => {});
+
+      // Persist cue points so the OffsetScrubber can render tick marks +
+      // drive snap-to-beat. The new clip's bar 1 lands at sample 0 by
+      // construction (the trim begins at the detected downbeat), so the
+      // default offset of 0 is correct. We only call setAudioOffsetSamples
+      // when a prior non-zero offset exists for this track (regeneration
+      // case) so we don't trigger an unnecessary clear+re-add of the clip
+      // we just wrote.
+      try {
+        await host.setCuePoints(trackId, result.cuePoints);
+      } catch (err: unknown) {
+        console.warn('[StemsPanel] setCuePoints failed:', err);
+      }
+
+      // Persist raw-file metadata so the trim editor can re-open the
+      // un-trimmed waveform without re-running detection. All three are
+      // best-effort — older binaries may emit no input_beats, in which
+      // case we skip the trim-editor UI surface entirely.
+      const rawFilePath = result.rawFilePath ?? null;
+      const rawCuePoints = result.rawCuePoints ?? null;
+      const initialTrimWindow = (
+        rawFilePath
+        && typeof result.inputStartSample === 'number'
+        && result.cuePoints
+      )
+        ? {
+            start_sample: result.inputStartSample,
+            // The processed file's last beat + one beat span gives the
+            // total trimmed duration. Falling back to a sample count that
+            // matches the trim-by-bars math when only durationSeconds is
+            // known.
+            duration_samples: Math.round(
+              result.durationSeconds * result.cuePoints.sample_rate
+            ),
+          }
+        : null;
+      try {
+        await host.setRawAudioFilePath(trackId, rawFilePath);
+        await host.setRawCuePoints(trackId, rawCuePoints);
+        await host.setTrimWindow(trackId, initialTrimWindow);
+      } catch (err: unknown) {
+        console.warn('[StemsPanel] persisting raw metadata failed:', err);
+      }
+
+      try {
+        const prior = await host.getAudioOffsetSamples(trackId);
+        if (prior !== 0) {
+          await host.setAudioOffsetSamples(trackId, 0);
+        }
+      } catch (err: unknown) {
+        console.warn('[StemsPanel] resetting offset failed:', err);
+      }
 
       setTracks(prev => prev.map(t =>
         t.handle.id === trackId
-          ? { ...t, isGenerating: false, runtimeState: { ...t.runtimeState, volume: 0.75 } }
+          ? {
+              ...t,
+              isGenerating: false,
+              runtimeState: { ...t.runtimeState, volume: 0.75, muted: true },
+              cuePoints: result.cuePoints,
+              offsetSamples: 0,
+              rawFilePath,
+              rawCuePoints,
+              trimWindow: initialTrimWindow,
+            }
           : t
       ));
       host.showToast('success', 'Audio generated');
@@ -331,6 +505,20 @@ export function StemsPanel({
       t.handle.id === trackId ? { ...t, runtimeState: { ...t.runtimeState, pan } } : t
     ));
     host.setTrackPan(trackId, pan).catch(() => {});
+  }, [host]);
+
+  // ─── Offset scrubber: persist on drag-end ───────────────────────────
+  const handleOffsetChange = useCallback((trackId: string, offsetSamples: number): void => {
+    // Optimistic UI update, then persist. The host applies the offset
+    // to the engine clip in setAudioOffsetSamples; if that fails, the
+    // persisted value still wins on next reload.
+    setTracks(prev => prev.map(t =>
+      t.handle.id === trackId ? { ...t, offsetSamples } : t
+    ));
+    host.setAudioOffsetSamples(trackId, offsetSamples).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Failed to set offset';
+      host.showToast('error', 'Offset failed', msg);
+    });
   }, [host]);
 
   // ─── FX Operations (optimistic UI) ──────────────────────────────
@@ -390,6 +578,44 @@ export function StemsPanel({
     }
   }, [host, tracks]);
 
+  const toggleTrimDrawer = useCallback((trackId: string): void => {
+    setTracks(prev => prev.map(t =>
+      t.handle.id === trackId ? { ...t, trimDrawerOpen: !t.trimDrawerOpen } : t
+    ));
+  }, []);
+
+  const fetchRawAudioBytes = useCallback(
+    (filePath: string): Promise<ArrayBuffer> => host.getAudioFileBytes(filePath),
+    [host],
+  );
+
+  const handleCommitTrim = useCallback(
+    async (trackId: string, window: PluginTrimWindow): Promise<void> => {
+      try {
+        const result = await host.commitTrimWindow(
+          trackId,
+          window.start_sample,
+          window.duration_samples,
+        );
+        setTracks(prev => prev.map(t =>
+          t.handle.id === trackId
+            ? {
+                ...t,
+                cuePoints: result.cuePoints,
+                offsetSamples: 0,
+                trimWindow: window,
+              }
+            : t
+        ));
+        host.showToast('success', 'Trim committed');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Trim failed';
+        host.showToast('error', 'Trim failed', msg);
+      }
+    },
+    [host],
+  );
+
   // ─── Split stems ────────────────────────────────────────────────
   const handleSplitStems = useCallback(async (trackId: string): Promise<void> => {
     setTracks(prev => prev.map(t =>
@@ -399,7 +625,13 @@ export function StemsPanel({
     try {
       const result = await host.splitStems(trackId);
 
-      // Build new stem track states
+      // Stem tracks inherit cue points from the parent — the host's
+      // splitStems() already wrote them via setCuePoints. We pull them
+      // from the parent's optimistic state to avoid an extra IPC round
+      // trip per stem; if the parent has none, the OffsetScrubber simply
+      // stays hidden on each stem.
+      const parentTrack = tracks.find(t => t.handle.id === trackId);
+      const inheritedCues = parentTrack?.cuePoints ?? null;
       const newStemTracks: AudioTrackState[] = result.stems.map(stem => ({
         handle: stem.track,
         description: `${stem.stemType} stem`,
@@ -408,6 +640,15 @@ export function StemsPanel({
         fxDrawerOpen: false,
         isGenerating: false,
         isSplitting: false,
+        cuePoints: inheritedCues,
+        offsetSamples: 0,
+        // Stems are derived from the processed file; the trim editor
+        // operates on the raw Lyria output and is meaningful only on the
+        // texture track itself, not on its stems.
+        rawFilePath: null,
+        rawCuePoints: null,
+        trimWindow: null,
+        trimDrawerOpen: false,
       }));
 
       setTracks(prev => [
@@ -518,6 +759,11 @@ export function StemsPanel({
             onFxDryWetChange={handleFxDryWetChange}
             onToggleFxDrawer={toggleFxDrawer}
             onSplitStems={handleSplitStems}
+            onOffsetChange={handleOffsetChange}
+            onToggleTrimDrawer={toggleTrimDrawer}
+            onCommitTrim={handleCommitTrim}
+            fetchRawAudioBytes={fetchRawAudioBytes}
+            projectBpm={sceneContext?.bpm ?? 120}
           />
         ))
       )}
@@ -545,6 +791,11 @@ interface AudioTrackRowProps {
   onFxDryWetChange: (trackId: string, category: FxCategory, value: number) => void;
   onToggleFxDrawer: (trackId: string) => void;
   onSplitStems: (trackId: string) => void;
+  onOffsetChange: (trackId: string, offsetSamples: number) => void;
+  onToggleTrimDrawer: (trackId: string) => void;
+  onCommitTrim: (trackId: string, window: PluginTrimWindow) => Promise<void>;
+  fetchRawAudioBytes: (filePath: string) => Promise<ArrayBuffer>;
+  projectBpm: number;
 }
 
 function AudioTrackRow({
@@ -563,8 +814,17 @@ function AudioTrackRow({
   onFxDryWetChange,
   onToggleFxDrawer,
   onSplitStems,
+  onOffsetChange,
+  onToggleTrimDrawer,
+  onCommitTrim,
+  fetchRawAudioBytes,
+  projectBpm,
 }: AudioTrackRowProps): React.ReactElement {
-  const { handle, description, runtimeState, fxDetailState, fxDrawerOpen, isGenerating, isSplitting } = track;
+  const {
+    handle, description, runtimeState, fxDetailState, fxDrawerOpen, isGenerating,
+    isSplitting, cuePoints, offsetSamples, rawFilePath, rawCuePoints, trimWindow,
+    trimDrawerOpen,
+  } = track;
   const isMuted = runtimeState.muted;
   const isSoloed = runtimeState.solo;
   const currentVolume = runtimeState.volume;
@@ -653,6 +913,27 @@ function AudioTrackRow({
             >
               FX
             </button>
+            <button
+              data-testid="trim-edit-button"
+              onClick={() => onToggleTrimDrawer(handle.id)}
+              disabled={isGenerating || !rawFilePath}
+              className={`px-1.5 py-0.5 text-[10px] font-semibold rounded-sm transition-colors border flex-shrink-0 ${
+                isGenerating || !rawFilePath
+                  ? 'bg-sas-panel border-sas-border text-sas-muted/30 cursor-not-allowed'
+                  : trimDrawerOpen
+                    ? 'bg-sas-accent border-sas-accent text-sas-bg'
+                    : 'bg-sas-panel-alt border-sas-border text-sas-muted/60 hover:border-sas-accent hover:text-sas-accent'
+              }`}
+              title={
+                !rawFilePath
+                  ? 'Generate audio first to enable the trim editor'
+                  : trimDrawerOpen
+                    ? 'Hide trim editor'
+                    : 'Edit trim window inside the raw output'
+              }
+            >
+              EDIT
+            </button>
             {stemSplitterAvailable && (
               <button
                 data-testid="audio-stems-button"
@@ -733,6 +1014,24 @@ function AudioTrackRow({
         </button>
       </div>
 
+      {/* Offset scrubber — only rendered when cue points are present.
+          Hides for blank tracks (pre-generation) and stem tracks until
+          per-stem cue propagation lands. See OffsetScrubber.tsx. */}
+      {cuePoints && (
+        <div
+          data-testid="offset-scrubber-row"
+          className="border border-t-0 border-sas-border bg-sas-panel-alt rounded-b-sm px-2 py-1.5"
+        >
+          <OffsetScrubber
+            cuePoints={cuePoints}
+            offsetSamples={offsetSamples}
+            projectBpm={projectBpm}
+            onChange={(offset: number) => onOffsetChange(handle.id, offset)}
+            disabled={isGenerating || isSplitting}
+          />
+        </div>
+      )}
+
       {/* FX Drawer */}
       {fxDrawerOpen && (
         <div data-testid="fx-drawer" className="border border-t-0 border-sas-border bg-sas-bg rounded-b-sm px-3 py-2 max-h-[180px] overflow-y-auto">
@@ -743,6 +1042,22 @@ function AudioTrackRow({
             onPresetChange={onFxPresetChange}
             onDryWetChange={onFxDryWetChange}
             disabled={isGenerating}
+          />
+        </div>
+      )}
+
+      {/* Trim Editor Drawer — only when raw metadata is present. Older
+          tracks (generated before this feature shipped) silently skip. */}
+      {trimDrawerOpen && rawFilePath && (
+        <div className="border border-t-0 border-sas-border rounded-b-sm">
+          <TrimEditorDrawer
+            open={trimDrawerOpen}
+            rawFilePath={rawFilePath}
+            rawCuePoints={rawCuePoints}
+            initialTrimWindow={trimWindow}
+            fetchRawAudioBytes={fetchRawAudioBytes}
+            onCommit={(window: PluginTrimWindow) => onCommitTrim(handle.id, window)}
+            disabled={isGenerating || isSplitting}
           />
         </div>
       )}
