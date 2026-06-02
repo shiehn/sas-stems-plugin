@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GiSoundWaves } from 'react-icons/gi';
 import type { PluginUIProps, PluginTrackHandle, PluginTrackRuntimeState, PluginTrackFxDetailState, PluginFxCategoryDetailState, FxCategory, TrackFxDetailState, PluginCuePoints, PluginTrimWindow } from '@signalsandsorcery/plugin-sdk';
-import { VolumeSlider, PanSlider, FxToggleBar, SorceryProgressBar, EMPTY_FX_DETAIL_STATE, OffsetScrubber } from '@signalsandsorcery/plugin-sdk';
+import { VolumeSlider, PanSlider, FxToggleBar, SorceryProgressBar, EMPTY_FX_DETAIL_STATE, OffsetScrubber, ImportTrackModal } from '@signalsandsorcery/plugin-sdk';
 import { TrimEditorDrawer } from './TrimEditorDrawer';
 
 // ============================================================================
@@ -69,6 +69,7 @@ export function StemsPanel({
   const [tracks, setTracks] = useState<AudioTrackState[]>([]);
   const [isLoadingTracks, setIsLoadingTracks] = useState(false);
   const [stemSplitterAvailable, setStemSplitterAvailable] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const saveTimeoutRefs = useRef<Record<string, NodeJS.Timeout>>({});
   /** Maps engine track ID → stable DB UUID for plugin_data key construction */
   const engineToDbIdRef = useRef<Map<string, string>>(new Map());
@@ -90,6 +91,12 @@ export function StemsPanel({
     if (!sceneAtStart) {
       setTracks([]);
       tracksLoadedForSceneRef.current = null;
+      // No scene → not loading. Without this, a load that already set
+      // isLoadingTracks=true and is then superseded by a flip to a null
+      // activeSceneId (the platform's effectiveSceneId briefly returns null
+      // while project.scenes repopulates during load) leaves the spinner
+      // stuck on "Loading tracks..." forever.
+      setIsLoadingTracks(false);
       return;
     }
 
@@ -679,6 +686,24 @@ export function StemsPanel({
     const addDisabled = needsContract || !isConnected || !activeSceneId || tracks.length >= MAX_TRACKS;
     onHeaderContent(
       <div className="flex gap-1">
+        {host.listImportableTracks && (
+          <button
+            data-testid="import-from-scene-stems-button"
+            onClick={(e: React.MouseEvent) => {
+              e.stopPropagation();
+              onExpandSelf?.();
+              setImportOpen(true);
+            }}
+            disabled={!activeSceneId}
+            className={`px-2 py-0.5 text-[10px] font-medium rounded-sm border transition-colors ${
+              !activeSceneId
+                ? 'bg-sas-panel border-sas-border text-sas-muted/50 cursor-not-allowed'
+                : 'bg-sas-panel-alt border-sas-border text-sas-muted hover:border-sas-accent hover:text-sas-accent'
+            }`}
+          >
+            Import
+          </button>
+        )}
         <button
           data-testid="add-audio-track-button"
           onClick={(e: React.MouseEvent) => {
@@ -697,7 +722,7 @@ export function StemsPanel({
       </div>
     );
     return () => { onHeaderContent(null); };
-  }, [onHeaderContent, isConnected, activeSceneId, tracks.length, handleAddTrack, needsContract, onOpenContract]);
+  }, [onHeaderContent, isConnected, activeSceneId, tracks.length, handleAddTrack, needsContract, onOpenContract, host]);
 
   // ─── Push loading state to accordion header ────────────────────────
   useEffect(() => {
@@ -726,6 +751,15 @@ export function StemsPanel({
   if (!sceneContext?.hasContract) {
     return (
       <div data-testid="no-contract-placeholder-audio" className="flex items-center justify-center py-8">
+        {host.listImportableTracks && (
+          <ImportTrackModal
+            host={host}
+            open={importOpen}
+            onClose={() => setImportOpen(false)}
+            onImported={() => { void loadTracks(); }}
+            testIdPrefix="stems-import"
+          />
+        )}
         <button
           onClick={() => onOpenContract?.()}
           className="text-sas-muted text-xs hover:text-sas-accent transition-colors underline underline-offset-2"
@@ -738,6 +772,15 @@ export function StemsPanel({
 
   return (
     <div data-testid="audio-section" className="p-2 space-y-2">
+      {host.listImportableTracks && (
+        <ImportTrackModal
+          host={host}
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          onImported={() => { void loadTracks(); }}
+          testIdPrefix="stems-import"
+        />
+      )}
       {isLoadingTracks ? (
         <div className="text-sas-muted text-xs text-center py-4">Loading tracks...</div>
       ) : (
