@@ -37,6 +37,35 @@ jest.mock('@signalsandsorcery/plugin-sdk', () => ({
     delay: { enabled: false, presetIndex: 0, dryWet: 1.0 },
     reverb: { enabled: false, presetIndex: 0, dryWet: 1.0 },
   },
+  // ConfirmDialog guards track deletion; honor `open` so closed dialogs render
+  // nothing (existing tests never open it) and expose the testids the new
+  // delete-confirmation tests below drive.
+  ConfirmDialog: ({
+    open,
+    message,
+    confirmLabel,
+    onConfirm,
+    onCancel,
+    testIdPrefix = 'confirm-dialog',
+  }: {
+    open: boolean;
+    message: React.ReactNode;
+    confirmLabel?: string;
+    onConfirm: () => void;
+    onCancel: () => void;
+    testIdPrefix?: string;
+  }) =>
+    open ? (
+      <div data-testid={`${testIdPrefix}-modal`}>
+        <div data-testid={`${testIdPrefix}-message`}>{message}</div>
+        <button data-testid={`${testIdPrefix}-confirm`} onClick={onConfirm}>
+          {confirmLabel ?? 'Delete'}
+        </button>
+        <button data-testid={`${testIdPrefix}-cancel`} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    ) : null,
 }));
 
 jest.mock('react-icons/gi', () => ({
@@ -460,5 +489,69 @@ describe('StemsPanel - generated track is muted by default', () => {
     await waitFor(() => {
       expect(setTrackMuteMock).toHaveBeenCalledWith('track-1', true);
     });
+  });
+});
+
+describe('StemsPanel - delete confirmation', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function renderWithOneTrack(): Promise<jest.Mock<any>> {
+    const deleteTrack = fn().mockResolvedValue(undefined);
+    const host = makeMockHost({ deleteTrack });
+    await act(async () => {
+      render(
+        <StemsPanel
+          host={host}
+          activeSceneId="scene-1"
+          isAuthenticated={true}
+          isConnected={true}
+          sceneContext={defaultSceneContext}
+        />
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('audio-delete-button')).toBeTruthy();
+    });
+    return deleteTrack;
+  }
+
+  it('clicking "x" opens a confirm dialog WITHOUT deleting yet', async () => {
+    const deleteTrack = await renderWithOneTrack();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('audio-delete-button'));
+    });
+
+    expect(deleteTrack).not.toHaveBeenCalled();
+    expect(screen.getByTestId('audio-delete-confirm-modal')).toBeTruthy();
+  });
+
+  it('confirming deletes the track exactly once', async () => {
+    const deleteTrack = await renderWithOneTrack();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('audio-delete-button'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('audio-delete-confirm-confirm'));
+    });
+
+    await waitFor(() => {
+      expect(deleteTrack).toHaveBeenCalledTimes(1);
+    });
+    expect(deleteTrack).toHaveBeenCalledWith('track-1');
+  });
+
+  it('cancelling does NOT delete and closes the dialog', async () => {
+    const deleteTrack = await renderWithOneTrack();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('audio-delete-button'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('audio-delete-confirm-cancel'));
+    });
+
+    expect(deleteTrack).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('audio-delete-confirm-modal')).toBeNull();
   });
 });

@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GiSoundWaves } from 'react-icons/gi';
 import type { PluginUIProps, PluginTrackHandle, PluginTrackRuntimeState, PluginTrackFxDetailState, PluginFxCategoryDetailState, FxCategory, TrackFxDetailState, PluginCuePoints, PluginTrimWindow } from '@signalsandsorcery/plugin-sdk';
-import { VolumeSlider, PanSlider, FxToggleBar, SorceryProgressBar, EMPTY_FX_DETAIL_STATE, OffsetScrubber, ImportTrackModal } from '@signalsandsorcery/plugin-sdk';
+import { VolumeSlider, PanSlider, FxToggleBar, SorceryProgressBar, EMPTY_FX_DETAIL_STATE, OffsetScrubber, ImportTrackModal, ConfirmDialog } from '@signalsandsorcery/plugin-sdk';
 import { TrimEditorDrawer } from './TrimEditorDrawer';
 
 // ============================================================================
@@ -875,6 +875,10 @@ function AudioTrackRow({
     (d: { enabled: boolean }) => d.enabled
   );
 
+  // Guard the (irreversible) delete behind a confirmation modal — the bare "x"
+  // was one stray click away from losing an audio track.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -1049,7 +1053,7 @@ function AudioTrackRow({
         {/* Delete button */}
         <button
           data-testid="audio-delete-button"
-          onClick={() => onDelete(handle.id)}
+          onClick={() => setConfirmDelete(true)}
           className="text-sas-danger/70 hover:text-sas-danger px-1 transition-colors relative z-10 self-stretch flex items-center"
           title="Delete track"
         >
@@ -1104,6 +1108,24 @@ function AudioTrackRow({
           />
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Delete track?"
+        message={
+          <>
+            <span className="text-sas-text">{handle.name?.trim() || 'This track'}</span> will be
+            permanently removed from this scene. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete"
+        onConfirm={() => {
+          setConfirmDelete(false);
+          onDelete(handle.id);
+        }}
+        onCancel={() => setConfirmDelete(false)}
+        testIdPrefix="audio-delete-confirm"
+      />
     </div>
   );
 }
